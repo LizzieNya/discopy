@@ -1,13 +1,19 @@
 {
   "name": "discopy",
   "version": "1.0.0",
-  "description": "Discord bot that downloads all photos from a channel",
+  "description": "Discord bot that downloads all photos and videos from a channel",
   "main": "index.js",
+  "bin": {
+    "discopy": "./cli.js"
+  },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "download": "node cli.js"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
     "discord.js": "^14.16.3",
-    "dotenv": "^16.4.7"
+    "dotenv": "^16.4.7",
+    "express": "^5.2.1"
   }
 }

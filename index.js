@@ -2,160 +2,53 @@ require("dotenv").config();
 const {
   Client,
   GatewayIntentBits,
-  Partials,
-  Collection,
   PermissionFlagsBits,
   EmbedBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
   SlashCommandBuilder,
   REST,
   Routes,
+  ApplicationIntegrationType,
+  InteractionContextType,
 } = require("discord.js");
 const fs = require("fs");
 const path = require("path");
-const https = require("https");
-const http = require("http");
+const express = require("express");
+const archiver = require("archiver");
+const { downloadFromChannel } = require("./downloader");
 
 // ─── Configuration ───────────────────────────────────────────────
 const TOKEN = process.env.DISCORD_TOKEN;
+const USER_TOKEN = process.env.DISCORD_USER_TOKEN;
 const DOWNLOAD_DIR = path.join(__dirname, "downloads");
+const PORT = process.env.PORT || 3000;
+const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
 
-// Image file extensions we look for
-const IMAGE_EXTENSIONS = new Set([
-  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".tiff", ".ico",
-]);
+// ─── Web Server for Zips ─────────────────────────────────────────
+const app = express();
 
-// ─── Helpers ─────────────────────────────────────────────────────
+app.get("/download/:server/:channel", (req, res) => {
+  const server = req.params.server;
+  const channel = req.params.channel;
+  const folderPath = path.join(DOWNLOAD_DIR, server, channel);
 
-/**
- * Check if a URL points to an image based on its extension.
- */
-function isImageUrl(url) {
-  try {
-    const parsed = new URL(url);
-    const ext = path.extname(parsed.pathname).toLowerCase();
-    return IMAGE_EXTENSIONS.has(ext);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Download a file from a URL and save it locally.
- * Returns a promise that resolves when the download is complete.
- */
-function downloadFile(url, destPath) {
-  return new Promise((resolve, reject) => {
-    const dir = path.dirname(destPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-
-    const file = fs.createWriteStream(destPath);
-    const client = url.startsWith("https") ? https : http;
-
-    client
-      .get(url, (response) => {
-        // Handle redirects
-        if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-          file.close();
-          fs.unlinkSync(destPath);
-          return downloadFile(response.headers.location, destPath).then(resolve).catch(reject);
-        }
-
-        if (response.statusCode !== 200) {
-          file.close();
-          fs.unlinkSync(destPath);
-          return reject(new Error(`HTTP ${response.statusCode} for ${url}`));
-        }
-
-        response.pipe(file);
-        file.on("finish", () => {
-          file.close(resolve);
-        });
-      })
-      .on("error", (err) => {
-        file.close();
-        if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
-        reject(err);
-      });
-  });
-}
-
-/**
- * Fetch ALL messages from a channel using pagination.
- */
-async function fetchAllMessages(channel, statusCallback) {
-  const allMessages = [];
-  let lastId = null;
-  let fetched;
-
-  do {
-    const options = { limit: 100 };
-    if (lastId) options.before = lastId;
-
-    fetched = await channel.messages.fetch(options);
-    if (fetched.size === 0) break;
-
-    allMessages.push(...fetched.values());
-    lastId = fetched.last().id;
-
-    if (statusCallback) {
-      statusCallback(allMessages.length);
-    }
-
-    // Small delay to avoid rate limiting
-    await new Promise((r) => setTimeout(r, 300));
-  } while (fetched.size === 100);
-
-  return allMessages;
-}
-
-/**
- * Extract all image URLs from a message (attachments + embeds).
- */
-function extractImageUrls(message) {
-  const urls = [];
-
-  // 1. Direct attachments
-  for (const attachment of message.attachments.values()) {
-    if (attachment.contentType?.startsWith("image/") || isImageUrl(attachment.url)) {
-      urls.push({
-        url: attachment.url,
-        filename: attachment.name || `attachment_${attachment.id}`,
-      });
-    }
+  if (!fs.existsSync(folderPath)) {
+    return res.status(404).send("Folder not found. Maybe it hasn't been downloaded yet or the name is incorrect.");
   }
 
-  // 2. Embeds (thumbnail, image)
-  for (const embed of message.embeds) {
-    if (embed.image?.url && isImageUrl(embed.image.url)) {
-      const parsed = new URL(embed.image.url);
-      urls.push({
-        url: embed.image.url,
-        filename: path.basename(parsed.pathname) || `embed_image_${Date.now()}`,
-      });
-    }
-    if (embed.thumbnail?.url && isImageUrl(embed.thumbnail.url)) {
-      const parsed = new URL(embed.thumbnail.url);
-      urls.push({
-        url: embed.thumbnail.url,
-        filename: path.basename(parsed.pathname) || `embed_thumb_${Date.now()}`,
-      });
-    }
-  }
+  res.attachment(`${server}_${channel}.zip`);
+  const archive = archiver("zip", { zlib: { level: 9 } });
 
-  return urls;
-}
+  archive.on("error", (err) => res.status(500).send({ error: err.message }));
 
-/**
- * Sanitize a string for use as a folder/file name.
- */
-function sanitize(name) {
-  return name.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").substring(0, 100);
-}
+  archive.pipe(res);
+  archive.directory(folderPath, false);
+  archive.finalize();
+});
+
+app.listen(PORT, () => {
+  console.log(`🌍  Web server running on port ${PORT}`);
+  console.log(`🔗  Zipped files accessible via: ${PUBLIC_URL}/download/...`);
+});
 
 // ─── Discord Client ──────────────────────────────────────────────
 const client = new Client({
@@ -173,28 +66,43 @@ const activeDownloads = new Map();
 const commands = [
   new SlashCommandBuilder()
     .setName("download")
-    .setDescription("Download all images from a channel")
+    .setDescription("Download all images and videos from a channel")
+    .setIntegrationTypes(
+      ApplicationIntegrationType.GuildInstall,
+      ApplicationIntegrationType.UserInstall
+    )
+    .setContexts(InteractionContextType.Guild)
     .addChannelOption((opt) =>
       opt
         .setName("channel")
-        .setDescription("The channel to download images from (defaults to current channel)")
+        .setDescription("The channel to download media from (defaults to current channel)")
         .setRequired(false)
     )
     .toJSON(),
   new SlashCommandBuilder()
     .setName("cancel")
     .setDescription("Cancel an active download in this channel")
+    .setIntegrationTypes(
+      ApplicationIntegrationType.GuildInstall,
+      ApplicationIntegrationType.UserInstall
+    )
+    .setContexts(InteractionContextType.Guild)
     .toJSON(),
   new SlashCommandBuilder()
     .setName("stats")
     .setDescription("Show download statistics for active downloads")
+    .setIntegrationTypes(
+      ApplicationIntegrationType.GuildInstall,
+      ApplicationIntegrationType.UserInstall
+    )
+    .setContexts(InteractionContextType.Guild)
     .toJSON(),
 ];
 
 client.once("ready", async () => {
   console.log(`\n✅  Logged in as ${client.user.tag}`);
   console.log(`📡  Serving ${client.guilds.cache.size} server(s)`);
-  console.log(`\n💡  Use /download in any channel to start downloading images.\n`);
+  console.log(`\n💡  Use /download in any channel to start downloading media.\n`);
 
   // Register slash commands globally
   const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -214,15 +122,48 @@ client.on("interactionCreate", async (interaction) => {
   if (interaction.commandName === "download") {
     const targetChannel = interaction.options.getChannel("channel") || interaction.channel;
 
-    // Permission check
-    const botMember = interaction.guild?.members.cache.get(client.user.id);
-    if (targetChannel.isTextBased && botMember) {
-      const perms = targetChannel.permissionsFor(botMember);
-      if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.ReadMessageHistory)) {
+    // Check if the bot is actually in this server (needed for reading message history)
+    const botMember = interaction.guild?.members.cache.get(client.user.id)
+      || await interaction.guild?.members.fetch(client.user.id).catch(() => null);
+
+    let useToken = `Bot ${TOKEN}`;
+    let usingFallback = false;
+
+    if (!botMember) {
+      if (!USER_TOKEN) {
+        const inviteUrl = `https://discord.com/oauth2/authorize?client_id=${client.user.id}&permissions=66560&integration_type=0&scope=bot+applications.commands`;
+        const channelUrl = `https://discord.com/channels/${interaction.guildId}/${targetChannel.id}`;
         return interaction.reply({
-          content: "❌ I don't have permission to read that channel. I need **View Channel** and **Read Message History**.",
+          embeds: [
+            new EmbedBuilder()
+              .setTitle("📸  Can't Access This Server Directly")
+              .setDescription(
+                `I'm not a member of this server, so I can't read messages here.\n\n` +
+                `The owner has not configured a fallback user token.\n\n` +
+                `**Option 1 — Use the local CLI**:\n` +
+                `\`\`\`\nnode cli.js ${channelUrl}\n\`\`\`\n` +
+                `**Option 2 — Add me to this server:**\n` +
+                `Ask a server admin to [**invite me**](${inviteUrl}), then use \`/download\` again.`
+              )
+              .setColor(0x5865f2),
+          ],
           ephemeral: true,
         });
+      }
+
+      // Fallback to user token since bot isn't in server
+      useToken = USER_TOKEN;
+      usingFallback = true;
+    } else {
+      // Bot is in the server, check perms using typical discord.js methods
+      if (targetChannel.isTextBased) {
+        const perms = targetChannel.permissionsFor(botMember);
+        if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.ReadMessageHistory)) {
+          return interaction.reply({
+            content: "❌ I don't have permission to read that channel. I need **View Channel** and **Read Message History**.",
+            ephemeral: true,
+          });
+        }
       }
     }
 
@@ -236,167 +177,80 @@ client.on("interactionCreate", async (interaction) => {
 
     await interaction.deferReply();
 
-    // Create the download task
-    const task = {
-      cancelled: false,
-      totalMessages: 0,
-      totalImages: 0,
-      downloaded: 0,
-      failed: 0,
-      skipped: 0,
-    };
-    activeDownloads.set(targetChannel.id, task);
+    const ongoingDownload = { cancelled: false };
+    activeDownloads.set(targetChannel.id, ongoingDownload);
 
     try {
-      // ── Phase 1: Fetch all messages ──
       await interaction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle("📥  Scanning Channel")
-            .setDescription(`Fetching messages from <#${targetChannel.id}>...`)
+            .setTitle(usingFallback ? "📥  Auto-Fallback: Scanning Channel" : "📥  Scanning Channel")
+            .setDescription(`Fetching messages from <#${targetChannel.id}>...${usingFallback ? '\n*(Using host account fallback token to access messages)*' : ''}`)
             .setColor(0x5865f2),
         ],
       });
 
-      const messages = await fetchAllMessages(targetChannel, (count) => {
-        task.totalMessages = count;
+      const result = await downloadFromChannel({
+        channelId: targetChannel.id,
+        userToken: useToken,
+        downloadDir: DOWNLOAD_DIR,
+        shouldCancel: () => ongoingDownload.cancelled,
+        onProgress: async (status) => {
+          // Update discord every once in a while
+          if (status.phase === "downloading" && (status.downloaded % 10 === 0 || status.downloaded === status.totalMedia)) {
+            try {
+              await interaction.editReply({
+                embeds: [
+                  new EmbedBuilder()
+                    .setTitle("⬇️  Downloading Media")
+                    .setDescription(
+                      `**${status.downloaded}** / **${status.totalMedia}** downloaded${status.failed > 0 ? ` (${status.failed} failed)` : ""}${status.skipped > 0 ? ` (${status.skipped} skipped)` : ""}`
+                    )
+                    .setColor(0x57f287)
+                    .setFooter({ text: `${status.pct}% complete` }),
+                ]
+              });
+            } catch { /* ignore update errors */ }
+          }
+        }
       });
 
-      if (task.cancelled) {
-        activeDownloads.delete(targetChannel.id);
-        return interaction.editReply({
-          embeds: [
-            new EmbedBuilder()
-              .setTitle("🚫  Download Cancelled")
-              .setColor(0xed4245),
-          ],
-        });
-      }
-
-      task.totalMessages = messages.length;
-
-      // ── Phase 2: Collect image URLs ──
-      const imageQueue = [];
-      for (const msg of messages) {
-        const images = extractImageUrls(msg);
-        imageQueue.push(...images);
-      }
-
-      task.totalImages = imageQueue.length;
-
-      if (imageQueue.length === 0) {
-        activeDownloads.delete(targetChannel.id);
-        return interaction.editReply({
-          embeds: [
-            new EmbedBuilder()
-              .setTitle("📭  No Images Found")
-              .setDescription(
-                `Scanned **${messages.length.toLocaleString()}** messages in <#${targetChannel.id}> but found no images.`
-              )
-              .setColor(0xfee75c),
-          ],
-        });
-      }
-
-      // ── Phase 3: Download images ──
-      const serverName = sanitize(interaction.guild?.name || "DM");
-      const channelName = sanitize(targetChannel.name || targetChannel.id);
-      const destDir = path.join(DOWNLOAD_DIR, serverName, channelName);
-
-      await interaction.editReply({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle("⬇️  Downloading Images")
-            .setDescription(
-              `Found **${imageQueue.length.toLocaleString()}** images across **${messages.length.toLocaleString()}** messages.\n\nDownloading to \`downloads/${serverName}/${channelName}/\`...`
-            )
-            .setColor(0x57f287)
-            .setFooter({ text: "0% complete" }),
-        ],
-      });
-
-      // Track filenames to avoid collisions
-      const usedNames = new Set();
-
-      for (let i = 0; i < imageQueue.length; i++) {
-        if (task.cancelled) break;
-
-        const { url, filename } = imageQueue[i];
-
-        // Make the filename unique
-        let safeName = sanitize(filename);
-        if (usedNames.has(safeName.toLowerCase())) {
-          const ext = path.extname(safeName);
-          const base = path.basename(safeName, ext);
-          safeName = `${base}_${i}${ext}`;
-        }
-        usedNames.add(safeName.toLowerCase());
-
-        const destPath = path.join(destDir, safeName);
-
-        // Skip if file already exists
-        if (fs.existsSync(destPath)) {
-          task.skipped++;
-          task.downloaded++;
-          continue;
-        }
-
-        try {
-          await downloadFile(url, destPath);
-          task.downloaded++;
-        } catch (err) {
-          task.failed++;
-          console.error(`  ✗ Failed: ${filename} — ${err.message}`);
-        }
-
-        // Update progress every 10 images or on the last one
-        if (i % 10 === 0 || i === imageQueue.length - 1) {
-          const pct = Math.round(((i + 1) / imageQueue.length) * 100);
-          await interaction
-            .editReply({
-              embeds: [
-                new EmbedBuilder()
-                  .setTitle("⬇️  Downloading Images")
-                  .setDescription(
-                    `**${task.downloaded}** / **${imageQueue.length}** downloaded${task.failed > 0 ? ` (${task.failed} failed)` : ""}${task.skipped > 0 ? ` (${task.skipped} skipped)` : ""}`
-                  )
-                  .setColor(0x57f287)
-                  .setFooter({ text: `${pct}% complete` }),
-              ],
-            })
-            .catch(() => {});
-        }
-
-        // Small delay to be nice to Discord CDN
-        await new Promise((r) => setTimeout(r, 100));
-      }
-
-      // ── Done ──
       activeDownloads.delete(targetChannel.id);
 
       const embed = new EmbedBuilder()
-        .setTitle(task.cancelled ? "🚫  Download Cancelled" : "✅  Download Complete")
-        .setColor(task.cancelled ? 0xed4245 : 0x57f287)
+        .setTitle(result.cancelled ? "🚫  Download Cancelled" : "✅  Download Complete")
+        .setColor(result.cancelled ? 0xed4245 : 0x57f287)
         .addFields(
-          { name: "📨 Messages Scanned", value: task.totalMessages.toLocaleString(), inline: true },
-          { name: "🖼️ Images Found", value: task.totalImages.toLocaleString(), inline: true },
-          { name: "✅ Downloaded", value: task.downloaded.toLocaleString(), inline: true },
+          { name: "📨 Messages Scanned", value: result.totalMessages.toLocaleString(), inline: true },
+          { name: "💽 Media Found", value: result.totalMedia.toLocaleString(), inline: true },
+          { name: "✅ Downloaded", value: result.downloaded.toLocaleString(), inline: true },
         );
 
-      if (task.failed > 0) {
-        embed.addFields({ name: "❌ Failed", value: task.failed.toLocaleString(), inline: true });
+      if (result.failed > 0) {
+        embed.addFields({ name: "❌ Failed", value: result.failed.toLocaleString(), inline: true });
       }
-      if (task.skipped > 0) {
-        embed.addFields({ name: "⏭️ Skipped (exists)", value: task.skipped.toLocaleString(), inline: true });
+      if (result.skipped > 0) {
+        embed.addFields({ name: "⏭️ Skipped (exists)", value: result.skipped.toLocaleString(), inline: true });
       }
+
+      const zipUrl = `${PUBLIC_URL}/download/${encodeURIComponent(result.serverName)}/${encodeURIComponent(result.channelName)}`;
 
       embed.addFields({
         name: "📁 Saved To",
-        value: `\`downloads/${serverName}/${channelName}/\``,
+        value: `\`${result.savePath}\``,
         inline: false,
       });
 
+      if (!result.cancelled && result.totalMedia > 0) {
+        embed.addFields({
+          name: "📦 Download ZIP",
+          value: `[**Click here to download all media**](${zipUrl})`,
+          inline: false
+        });
+      }
+
       await interaction.editReply({ embeds: [embed] });
+
     } catch (err) {
       activeDownloads.delete(targetChannel.id);
       console.error("Download error:", err);
@@ -447,7 +301,7 @@ client.on("interactionCreate", async (interaction) => {
     for (const [channelId, task] of activeDownloads) {
       embed.addFields({
         name: `<#${channelId}>`,
-        value: `${task.downloaded}/${task.totalImages} images (${task.failed} failed)`,
+        value: `Downloading...`, 
         inline: false,
       });
     }

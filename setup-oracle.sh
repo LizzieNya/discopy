@@ -1,33 +1,23 @@
 #!/bin/bash
-# ──────────────────────────────────────────────────
-# Oracle Cloud VM Setup Script for Discopy
-# Run this ONCE after SSH-ing into your free VM
-# ──────────────────────────────────────────────────
+echo "🚀 Starting Discopy Setup for Oracle Linux..."
 
-echo "📦 Updating system..."
-sudo apt update && sudo apt upgrade -y
+echo "📦 1. Installing Node.js 20 and Unzip..."
+curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+sudo dnf install -y nodejs unzip
 
-echo "📦 Installing Node.js 20..."
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
+echo "🛡️ 2. Opening Port 3000 in Linux Firewall (firewalld)..."
+sudo firewall-cmd --zone=public --add-port=3000/tcp --permanent
+sudo firewall-cmd --reload
 
-echo "📦 Installing Git..."
-sudo apt install -y git
+echo "⚙️ 3. Installing PM2 (to keep the bot online 24/7)..."
+sudo npm install -g pm2
+sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u opc --hp /home/opc
 
-echo "📂 Cloning your bot..."
-# Replace with YOUR GitHub repo URL
-git clone https://github.com/YOUR_USERNAME/discopy.git
-cd discopy
-
-echo "📦 Installing dependencies..."
-npm install
-
-echo ""
-echo "✅ Setup complete!"
-echo ""
-echo "Next steps:"
-echo "  1. Edit your .env file:  nano .env"
-echo "     Add your bot token:   DISCORD_TOKEN=your_token_here"
-echo "  2. Start the bot:        sudo npm install -g pm2 && pm2 start index.js --name discopy"
-echo "  3. Auto-start on reboot: pm2 save && pm2 startup"
-echo ""
+echo "✅ Setup Complete!"
+echo "----------------------------------------------------"
+echo "NEXT STEPS:"
+echo "1. Upload your 'discopy_deploy.zip' file to the server."
+echo "2. Unzip it: unzip discopy_deploy.zip"
+echo "3. Run: npm install"
+echo "4. Copy .env.example to .env and fill in your tokens."
+echo "5. Start it: pm2 start index.js --name 'discopy' && pm2 save"
